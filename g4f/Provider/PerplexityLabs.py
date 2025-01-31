@@ -5,6 +5,7 @@ import json
 
 from ..typing import AsyncResult, Messages
 from ..requests import StreamSession, raise_for_status
+from ..providers.response import FinishReason
 from .base_provider import AsyncGeneratorProvider, ProviderModelMixin
 
 API_URL = "https://www.perplexity.ai/socket.io/"
@@ -13,23 +14,16 @@ WS_URL = "wss://www.perplexity.ai/socket.io/"
 class PerplexityLabs(AsyncGeneratorProvider, ProviderModelMixin):
     url = "https://labs.perplexity.ai"
     working = True
-    default_model = "llama-3.1-70b-instruct"
+
+    default_model = "sonar-pro"
     models = [
-        "llama-3.1-sonar-large-128k-online",
-        "llama-3.1-sonar-small-128k-online",
-        "llama-3.1-sonar-large-128k-chat",
-        "llama-3.1-sonar-small-128k-chat",
-        "llama-3.1-8b-instruct",
-        "llama-3.1-70b-instruct",
+        default_model,
+        "sonar",
+        "sonar-reasoning",
     ]
-    
     model_aliases = {
-        "sonar-online": "llama-3.1-sonar-large-128k-online",
-        "sonar-online": "sonar-small-128k-online",
-        "sonar-chat": "llama-3.1-sonar-large-128k-chat",
-        "sonar-chat": "llama-3.1-sonar-small-128k-chat",
-        "llama-3.1-8b": "llama-3.1-8b-instruct",
-        "llama-3.1-70b": "llama-3.1-70b-instruct",
+        "sonar-online": default_model,
+        "sonar-chat": default_model,
     }
 
     @classmethod
@@ -76,13 +70,14 @@ class PerplexityLabs(AsyncGeneratorProvider, ProviderModelMixin):
                 assert(await ws.receive_str())
                 assert(await ws.receive_str() == "6")
                 message_data = {
-                    "version": "2.5",
+                    "version": "2.16",
                     "source": "default",
-                    "model": cls.get_model(model),
+                    "model": model,
                     "messages": messages
                 }
                 await ws.send_str("42" + json.dumps(["perplexity_labs", message_data]))
                 last_message = 0
+                is_thinking = False
                 while True:
                     message = await ws.receive_str()
                     if message == "2":
@@ -95,6 +90,7 @@ class PerplexityLabs(AsyncGeneratorProvider, ProviderModelMixin):
                         yield data["output"][last_message:]
                         last_message = len(data["output"])
                         if data["final"]:
+                            yield FinishReason("stop")
                             break
                     except:
                         raise RuntimeError(f"Message: {message}")

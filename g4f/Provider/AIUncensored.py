@@ -1,112 +1,116 @@
 from __future__ import annotations
 
-import json
 from aiohttp import ClientSession
+import time
+import hmac
+import hashlib
+import json
+import random
 
 from ..typing import AsyncResult, Messages
+from ..requests.raise_for_status import raise_for_status
 from .base_provider import AsyncGeneratorProvider, ProviderModelMixin
 from .helper import format_prompt
-from ..image import ImageResponse
+from ..providers.response import FinishReason
 
 class AIUncensored(AsyncGeneratorProvider, ProviderModelMixin):
-    url = "https://www.aiuncensored.info"
+    url = "https://www.aiuncensored.info/ai_uncensored"
+    api_key = "62852b00cb9e44bca86f0ec7e7455dc6"
+    
     working = True
     supports_stream = True
     supports_system_message = True
     supports_message_history = True
     
-    default_model = 'ai_uncensored'
-    chat_models = [default_model]
-    image_models = ['ImageGenerator']
-    models = [*chat_models, *image_models]
+    default_model = "hermes3-70b"
+    models = [default_model]
+    
+    model_aliases = {"hermes-3": "hermes3-70b"}
 
-    api_endpoints = {
-        'ai_uncensored': "https://twitterclone-i0wr.onrender.com/api/chat",
-        'ImageGenerator': "https://twitterclone-4e8t.onrender.com/api/image"
-    }
+    @staticmethod
+    def calculate_signature(timestamp: str, json_dict: dict) -> str:
+        message = f"{timestamp}{json.dumps(json_dict)}"
+        secret_key = b'your-super-secret-key-replace-in-production'
+        signature = hmac.new(
+            secret_key,
+            message.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        return signature
 
-    @classmethod
-    def get_model(cls, model: str) -> str:
-        if model in cls.models:
-            return model
-        else:
-            return cls.default_model
+    @staticmethod
+    def get_server_url() -> str:
+        servers = [
+            "https://llm-server-nov24-ibak.onrender.com",
+            "https://llm-server-nov24-qv2w.onrender.com", 
+            "https://llm-server-nov24.onrender.com"
+        ]
+        return random.choice(servers)
 
     @classmethod
     async def create_async_generator(
         cls,
         model: str,
         messages: Messages,
-        proxy: str = None,
         stream: bool = False,
+        proxy: str = None,
+        api_key: str = None,
         **kwargs
-    ) -> AsyncResult:
+    ) -> AsyncResult:      
         model = cls.get_model(model)
         
-        if model in cls.chat_models:
-            async with ClientSession(headers={"content-type": "application/json"}) as session:
-                data = {
-                    "messages": [
-                        {"role": "user", "content": format_prompt(messages)}
-                    ],
-                    "stream": stream
-                }
-                async with session.post(cls.api_endpoints[model], json=data, proxy=proxy) as response:
-                    response.raise_for_status()
-                    if stream:
-                        async for chunk in cls._handle_streaming_response(response):
-                            yield chunk
-                    else:
-                        yield await cls._handle_non_streaming_response(response)
-        elif model in cls.image_models:
-            headers = {
-                "accept": "*/*",
-                "accept-language": "en-US,en;q=0.9",
-                "cache-control": "no-cache",
-                "content-type": "application/json",
-                "origin": cls.url,
-                "pragma": "no-cache",
-                "priority": "u=1, i",
-                "referer": f"{cls.url}/",
-                "sec-ch-ua": '"Chromium";v="129", "Not=A?Brand";v="8"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Linux"',
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "cross-site",
-                "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-            }
-            async with ClientSession(headers=headers) as session:
-                prompt = messages[0]['content']
-                data = {"prompt": prompt}
-                async with session.post(cls.api_endpoints[model], json=data, proxy=proxy) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    image_url = result.get('image_url', '')
-                    if image_url:
-                        yield ImageResponse(image_url, alt=prompt)
-                    else:
-                        yield "Failed to generate image. Please try again."
-
-    @classmethod
-    async def _handle_streaming_response(cls, response):
-        async for line in response.content:
-            line = line.decode('utf-8').strip()
-            if line.startswith("data: "):
-                if line == "data: [DONE]":
-                    break
-                try:
-                    json_data = json.loads(line[6:])
-                    if 'data' in json_data:
-                        yield json_data['data']
-                except json.JSONDecodeError:
-                    pass
-
-    @classmethod
-    async def _handle_non_streaming_response(cls, response):
-        response_json = await response.json()
-        return response_json.get('content', "Sorry, I couldn't generate a response.")
-
-    @classmethod
-    def validate_response(cls, response: str) -> str:
-        return response
+        timestamp = str(int(time.time()))
+        
+        json_dict = {
+            "messages": [{"role": "user", "content": format_prompt(messages)}],
+            "model": model,
+            "stream": stream
+        }
+        
+        signature = cls.calculate_signature(timestamp, json_dict)
+        
+        headers = {
+            'accept': '*/*',
+            'accept-language': 'en-US,en;q=0.9',
+            'content-type': 'application/json',
+            'origin': 'https://www.aiuncensored.info',
+            'referer': 'https://www.aiuncensored.info/',
+            'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'x-api-key': cls.api_key,
+            'x-timestamp': timestamp,
+            'x-signature': signature
+        }
+        
+        url = f"{cls.get_server_url()}/api/chat"
+        
+        async with ClientSession(headers=headers) as session:
+            async with session.post(url, json=json_dict, proxy=proxy) as response:
+                await raise_for_status(response)
+                
+                if stream:
+                    full_response = ""
+                    async for line in response.content:
+                        if line:
+                            try:
+                                line_text = line.decode('utf-8')
+                                if line_text.startswith(''):
+                                    data = line_text[6:]
+                                    if data == '[DONE]':
+                                        yield FinishReason("stop")
+                                        break
+                                    try:
+                                        json_data = json.loads(data)
+                                        if 'data' in json_data:
+                                            yield json_data['data']
+                                            full_response += json_data['data']
+                                    except json.JSONDecodeError:
+                                        continue
+                            except UnicodeDecodeError:
+                                continue
+                    if full_response:
+                        yield FinishReason("length")
+                else:
+                    response_json = await response.json()
+                    if 'content' in response_json:
+                        yield response_json['content']
+                        yield FinishReason("length")
